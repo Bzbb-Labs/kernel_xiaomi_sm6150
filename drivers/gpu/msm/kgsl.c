@@ -5127,9 +5127,6 @@ int kgsl_device_platform_probe(struct kgsl_device *device)
 				PM_QOS_CPU_DMA_LATENCY,
 				PM_QOS_DEFAULT_VALUE);
 
-
-
-
 	/* Initialize the snapshot engine */
 	kgsl_device_snapshot_init(device);
 
