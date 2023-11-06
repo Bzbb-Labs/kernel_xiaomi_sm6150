@@ -2381,6 +2381,21 @@ static irqreturn_t aw8624_irq(int irq, void *data)
 	if (reg_val & AW8624_BIT_SYSINT_OTI) {
 		pr_err("%s: chip over temperature int error\n", __func__);
 	}
+	if (reg_val & AW8624_BIT_SYSINT_DONEI) {
+		pr_debug("%s chip playback done\n", __func__);
+		/* mask donei */
+		aw8624_haptic_set_ram_donei(aw8624, false);
+	}
+	if (reg_val & AW8624_BIT_SYSINT_UVLI) {
+		aw8624_i2c_read(aw8624, AW8624_REG_GLB_STATE, &glb_st);
+		if (glb_st == 0) {
+			aw8624_i2c_write_bits(aw8624,
+			AW8624_REG_SYSINTM,
+			AW8624_BIT_SYSINTM_UVLO_MASK,
+			AW8624_BIT_SYSINTM_UVLO_OFF);
+		}
+	}
+
 	if (reg_val & AW8624_BIT_SYSINT_FF_AEI) {
 		pr_debug("%s: aw8624 rtp fifo almost empty int\n", __func__);
 		if (aw8624->rtp_init) {
