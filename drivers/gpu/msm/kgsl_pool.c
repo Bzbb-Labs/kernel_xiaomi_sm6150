@@ -345,7 +345,6 @@ int kgsl_pool_alloc_page(int *page_size, struct page **pages,
 			} else
 				return -ENOMEM;
 		}
-		_kgsl_pool_zero_page(page, order);
 		goto done;
 	}
 
@@ -365,7 +364,7 @@ int kgsl_pool_alloc_page(int *page_size, struct page **pages,
 			page = alloc_pages(gfp_mask, order);
 			if (page == NULL)
 				return -ENOMEM;
-			_kgsl_pool_zero_page(page, order);
+
 			goto done;
 		}
 	}
