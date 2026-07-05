@@ -5319,11 +5319,14 @@ static inline void update_overutilized_status(struct rq *rq)
 static void
 enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 {
-	struct cfs_rq *cfs_rq;
-	struct sched_entity *se = &p->se;
-	int task_new = !(flags & ENQUEUE_WAKEUP);
-	bool prefer_idle = sched_feat(EAS_PREFER_IDLE) ?
-				(schedtune_prefer_idle(p) > 0) : 0;
+        struct cfs_rq *cfs_rq;
+        struct sched_entity *se = &p->se;
+        int task_new = !(flags & ENQUEUE_WAKEUP);
+        bool prefer_idle = sched_feat(EAS_PREFER_IDLE) ?
+                                (schedtune_prefer_idle(p) > 0) : 0;
+#ifdef CONFIG_SCHED_BORE
+        int task_sleep;
+#endif
 
 #ifdef CONFIG_SCHED_WALT
 	p->misfit = !task_fits_max(p, rq->cpu);
@@ -5422,7 +5425,9 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 {
 	struct cfs_rq *cfs_rq;
 	struct sched_entity *se = &p->se;
-	int task_sleep = flags & DEQUEUE_SLEEP;
+	int task_sleep;
+
+	task_sleep = flags & DEQUEUE_SLEEP;
 
 	/*
 	 * The code below (indirectly) updates schedutil which looks at
