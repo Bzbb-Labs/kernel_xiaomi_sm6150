@@ -5129,6 +5129,7 @@ int kgsl_device_platform_probe(struct kgsl_device *device)
 
 
 
+
 	/* Initialize the snapshot engine */
 	kgsl_device_snapshot_init(device);
 
