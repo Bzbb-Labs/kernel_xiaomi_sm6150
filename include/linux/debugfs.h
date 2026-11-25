@@ -158,6 +158,11 @@ ssize_t debugfs_write_file_bool(struct file *file, const char __user *user_buf,
 
 #include <linux/err.h>
 
+static inline const struct file_operations *debugfs_real_fops(const struct file *filp)
+{
+	return filp->f_op;
+}
+
 /*
  * We do not return NULL from these functions if CONFIG_DEBUG_FS is not enabled
  * so users have a chance to detect if there was a real error or not.  We don't
