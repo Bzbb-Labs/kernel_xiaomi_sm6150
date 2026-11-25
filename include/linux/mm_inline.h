@@ -46,9 +46,17 @@ static __always_inline void update_lru_size(struct lruvec *lruvec,
 #endif
 }
 
+static inline bool lru_gen_add_page(struct lruvec *lruvec, struct page *page,
+				    bool reclaiming);
+static inline bool lru_gen_del_page(struct lruvec *lruvec, struct page *page,
+				    bool reclaiming);
+
 static __always_inline void add_page_to_lru_list(struct page *page,
 				struct lruvec *lruvec, enum lru_list lru)
 {
+	if (lru_gen_add_page(lruvec, page, false))
+		return;
+
 	update_lru_size(lruvec, lru, page_zonenum(page), hpage_nr_pages(page));
 	list_add(&page->lru, &lruvec->lists[lru]);
 }
@@ -56,6 +64,9 @@ static __always_inline void add_page_to_lru_list(struct page *page,
 static __always_inline void add_page_to_lru_list_tail(struct page *page,
 				struct lruvec *lruvec, enum lru_list lru)
 {
+	if (lru_gen_add_page(lruvec, page, true))
+		return;
+
 	update_lru_size(lruvec, lru, page_zonenum(page), hpage_nr_pages(page));
 	list_add_tail(&page->lru, &lruvec->lists[lru]);
 }
@@ -63,6 +74,9 @@ static __always_inline void add_page_to_lru_list_tail(struct page *page,
 static __always_inline void del_page_from_lru_list(struct page *page,
 				struct lruvec *lruvec, enum lru_list lru)
 {
+	if (lru_gen_del_page(lruvec, page, false))
+		return;
+
 	list_del(&page->lru);
 	update_lru_size(lruvec, lru, page_zonenum(page), -hpage_nr_pages(page));
 }
@@ -324,38 +338,4 @@ static inline bool lru_gen_del_page(struct lruvec *lruvec, struct page *page, bo
 
 #endif /* CONFIG_LRU_GEN */
 
-static __always_inline void add_page_to_lru_list(struct page *page,
-				struct lruvec *lruvec)
-{
-	enum lru_list lru = page_lru(page);
-
-	if (lru_gen_add_page(lruvec, page, false))
-		return;
-
-	update_lru_size(lruvec, lru, page_zonenum(page), hpage_nr_pages(page));
-	list_add(&page->lru, &lruvec->lists[lru]);
-}
-
-static __always_inline void add_page_to_lru_list_tail(struct page *page,
-				struct lruvec *lruvec)
-{
-	enum lru_list lru = page_lru(page);
-
-	if (lru_gen_add_page(lruvec, page, true))
-		return;
-
-	update_lru_size(lruvec, lru, page_zonenum(page), hpage_nr_pages(page));
-	list_add_tail(&page->lru, &lruvec->lists[lru]);
-}
-
-static __always_inline void del_page_from_lru_list(struct page *page,
-				struct lruvec *lruvec)
-{
-	if (lru_gen_del_page(lruvec, page, false))
-		return;
-
-	list_del(&page->lru);
-	update_lru_size(lruvec, page_lru(page), page_zonenum(page),
-			-hpage_nr_pages(page));
-}
 #endif
