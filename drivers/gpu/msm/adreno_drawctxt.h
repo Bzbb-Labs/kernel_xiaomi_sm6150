@@ -19,6 +19,7 @@ struct adreno_context_type {
 };
 
 #define ADRENO_CONTEXT_DRAWQUEUE_SIZE 128
+#define SUBMIT_RETIRE_TICKS_SIZE 7
 
 struct kgsl_device;
 struct adreno_device;
@@ -72,6 +73,8 @@ struct adreno_context {
 	unsigned int queued_timestamp;
 	struct adreno_ringbuffer *rb;
 	unsigned int submitted_timestamp;
+	uint64_t submit_retire_ticks[SUBMIT_RETIRE_TICKS_SIZE];
+	int ticks_index;
 
 	struct list_head active_node;
 	unsigned long active_time;
