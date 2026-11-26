@@ -1,5 +1,6 @@
 /*
  * Copyright (c) 2016-2021, The Linux Foundation. All rights reserved.
+ * Copyright (C) 2021 XiaoMi, Inc.
  * Copyright (C) 2014 Red Hat
  * Author: Rob Clark <robdclark@gmail.com>
  *
@@ -24,6 +25,7 @@
 #include "msm_gem.h"
 #include "msm_fence.h"
 #include "sde_trace.h"
+#include "xiaomi_frame_stat.h"
 
 #define MULTIPLE_CONN_DETECTED(x) (x > 1)
 
@@ -78,6 +80,7 @@ int msm_drm_notifier_call_chain(unsigned long val, void *v)
 	return blocking_notifier_call_chain(&msm_drm_notifier_list, val,
 					    v);
 }
+
 EXPORT_SYMBOL(msm_drm_notifier_call_chain);
 
 /* block until specified crtcs are no longer pending update, and
@@ -218,13 +221,8 @@ msm_disable_outputs(struct drm_device *dev, struct drm_atomic_state *old_state)
 	struct drm_connector_state *old_conn_state;
 	struct drm_crtc *crtc;
 	struct drm_crtc_state *old_crtc_state;
-
-#ifdef CONFIG_MACH_XIAOMI_PHOENIX
 	struct msm_drm_notifier notifier_data;
 	int i, blank;
-#else
-	int i;
-#endif
 
 	SDE_ATRACE_BEGIN("msm_disable");
 	for_each_connector_in_state(old_state, connector, old_conn_state, i) {
@@ -264,8 +262,6 @@ msm_disable_outputs(struct drm_device *dev, struct drm_atomic_state *old_state)
 		DRM_DEBUG_ATOMIC("disabling [ENCODER:%d:%s]\n",
 				 encoder->base.id, encoder->name);
 
-
-#ifdef CONFIG_MACH_XIAOMI_PHOENIX
 		if (connector->state->crtc &&
 			connector->state->crtc->state->active_changed) {
 			blank = MSM_DRM_BLANK_POWERDOWN;
@@ -274,7 +270,6 @@ msm_disable_outputs(struct drm_device *dev, struct drm_atomic_state *old_state)
 			msm_drm_notifier_call_chain(MSM_DRM_EARLY_EVENT_BLANK,
 						     &notifier_data);
 		}
-#endif
 		/*
 		 * Each encoder has at most one connector (since we always steal
 		 * it away), so we won't call disable hooks twice.
@@ -290,14 +285,12 @@ msm_disable_outputs(struct drm_device *dev, struct drm_atomic_state *old_state)
 			funcs->dpms(encoder, DRM_MODE_DPMS_OFF);
 
 		drm_bridge_post_disable(encoder->bridge);
-#ifdef CONFIG_MACH_XIAOMI_PHOENIX
 		if (connector->state->crtc &&
 			connector->state->crtc->state->active_changed) {
 			DRM_DEBUG_ATOMIC("Notify blank\n");
 			msm_drm_notifier_call_chain(MSM_DRM_EVENT_BLANK,
 						&notifier_data);
 		}
-#endif
 	}
 
 	for_each_crtc_in_state(old_state, crtc, old_crtc_state, i) {
@@ -438,18 +431,12 @@ static void msm_atomic_helper_commit_modeset_enables(struct drm_device *dev,
 	struct drm_crtc_state *new_crtc_state;
 	struct drm_connector *connector;
 	struct drm_connector_state *new_conn_state;
-#ifdef CONFIG_MACH_XIAOMI_PHOENIX
 	struct msm_drm_notifier notifier_data;
-#endif
 	struct msm_drm_private *priv = dev->dev_private;
 	struct msm_kms *kms = priv->kms;
 	int bridge_enable_count = 0;
-#ifdef CONFIG_MACH_XIAOMI_PHOENIX
 	int i, blank;
 	bool splash = false;
-#else
-	int i;
-#endif
 
 	SDE_ATRACE_BEGIN("msm_enable");
 	for_each_oldnew_crtc_in_state(old_state, crtc, old_crtc_state,
@@ -509,7 +496,6 @@ static void msm_atomic_helper_commit_modeset_enables(struct drm_device *dev,
 		DRM_DEBUG_ATOMIC("enabling [ENCODER:%d:%s]\n",
 				 encoder->base.id, encoder->name);
 
-#ifdef CONFIG_MACH_XIAOMI_PHOENIX
 		if (kms && kms->funcs && kms->funcs->check_for_splash)
 			splash = kms->funcs->check_for_splash(kms);
 
@@ -523,7 +509,6 @@ static void msm_atomic_helper_commit_modeset_enables(struct drm_device *dev,
 			msm_drm_notifier_call_chain(MSM_DRM_EARLY_EVENT_BLANK,
 					    &notifier_data);
 		}
-#endif
 		/*
 		 * Each encoder has at most one connector (since we always steal
 		 * it away), so we won't call enable hooks twice.
@@ -573,15 +558,12 @@ static void msm_atomic_helper_commit_modeset_enables(struct drm_device *dev,
 
 		drm_bridge_enable(encoder->bridge);
 
-#ifdef CONFIG_MACH_XIAOMI_PHOENIX
 		if (splash || (connector->state->crtc &&
 			connector->state->crtc->state->active_changed)) {
 			DRM_DEBUG_ATOMIC("Notify unblank\n");
 			msm_drm_notifier_call_chain(MSM_DRM_EVENT_BLANK,
 					    &notifier_data);
 		}
-#endif
-
 	}
 	SDE_ATRACE_END("msm_enable");
 }
@@ -633,6 +615,8 @@ static void complete_commit(struct msm_commit *c)
 static void _msm_drm_commit_work_cb(struct kthread_work *work)
 {
 	struct msm_commit *commit =  NULL;
+	ktime_t start, end;
+	s64 duration;
 
 	if (!work) {
 		DRM_ERROR("%s: Invalid commit work data!\n", __func__);
@@ -641,9 +625,16 @@ static void _msm_drm_commit_work_cb(struct kthread_work *work)
 
 	commit = container_of(work, struct msm_commit, commit_work);
 
+	start = ktime_get();
+	frame_stat_collector(0, COMMIT_START_TS);
+
 	SDE_ATRACE_BEGIN("complete_commit");
 	complete_commit(commit);
 	SDE_ATRACE_END("complete_commit");
+
+	end = ktime_get();
+	duration = ktime_to_ns(ktime_sub(end, start));
+	frame_stat_collector(duration, COMMIT_END_TS);
 }
 
 static struct msm_commit *commit_init(struct drm_atomic_state *state,

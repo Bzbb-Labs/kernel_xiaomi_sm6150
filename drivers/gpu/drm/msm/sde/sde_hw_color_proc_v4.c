@@ -13,6 +13,14 @@
 #include "sde_hw_color_proc_common_v4.h"
 #include "sde_hw_color_proc_v4.h"
 
+#ifdef CONFIG_KLAPSE
+#include <linux/klapse.h>
+
+unsigned short kcal_red = 256;
+unsigned short kcal_green = 256;
+unsigned short kcal_blue = 256;
+#endif
+
 static int sde_write_3d_gamut(struct sde_hw_blk_reg_map *hw,
 		struct drm_msm_3d_gamut *payload, u32 base,
 		u32 *opcode, u32 pipe, u32 scale_tbl_a_len,
@@ -157,7 +165,7 @@ void sde_setup_dspp_igcv3(struct sde_hw_dspp *ctx, void *cfg)
 	struct drm_msm_igc_lut *lut_cfg;
 	struct sde_hw_cp_cfg *hw_cfg = cfg;
 	int i = 0, j = 0;
-	u32 *addr[IGC_TBL_NUM];
+	u32 *addr = NULL;
 	u32 offset = 0;
 
 	if (!ctx || !cfg) {
@@ -179,20 +187,17 @@ void sde_setup_dspp_igcv3(struct sde_hw_dspp *ctx, void *cfg)
 
 	lut_cfg = hw_cfg->payload;
 
-	addr[0] = lut_cfg->c0;
-	addr[1] = lut_cfg->c1;
-	addr[2] = lut_cfg->c2;
-
 	for (i = 0; i < IGC_TBL_NUM; i++) {
+		addr = lut_cfg->c0 + (i * ARRAY_SIZE(lut_cfg->c0));
 		offset = IGC_C0_OFF + (i * sizeof(u32));
 
 		for (j = 0; j < IGC_TBL_LEN; j++) {
-			addr[i][j] &= IGC_DATA_MASK;
-			addr[i][j] |= IGC_DSPP_SEL_MASK(ctx->idx - 1);
+			addr[j] &= IGC_DATA_MASK;
+			addr[j] |= IGC_DSPP_SEL_MASK(ctx->idx - 1);
 			if (j == 0)
-				addr[i][j] |= IGC_INDEX_UPDATE;
+				addr[j] |= IGC_INDEX_UPDATE;
 			/* IGC lut registers are part of DSPP Top HW block */
-			SDE_REG_WRITE(&ctx->hw_top, offset, addr[i][j]);
+			SDE_REG_WRITE(&ctx->hw_top, offset, addr[j]);
 		}
 	}
 
