@@ -80,6 +80,7 @@ struct kgsl_drawobj_cmd {
 	struct kgsl_mem_entry *profiling_buf_entry;
 	uint64_t profiling_buffer_gpuaddr;
 	unsigned int profile_index;
+	uint64_t submit_ticks;
 };
 
 /**

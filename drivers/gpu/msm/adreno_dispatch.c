@@ -558,6 +558,8 @@ static int sendcmd(struct adreno_device *adreno_dev,
 			ADRENO_DRAWOBJ_PROFILE_COUNT;
 	}
 
+	cmdobj->submit_ticks = ktime_get_ns();
+
 	ret = adreno_ringbuffer_submitcmd(adreno_dev, cmdobj, NULL);
 
 	/*
