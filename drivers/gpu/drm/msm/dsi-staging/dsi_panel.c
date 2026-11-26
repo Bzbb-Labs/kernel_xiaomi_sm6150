@@ -925,7 +925,6 @@ bool dc_set_backlight(struct dsi_panel *panel, u32 bl_lvl)
 {
 	int i = 0;
 	int crcValue = 255;
-	float mDCBLCoeff[2] = {0.5125, 4.9};
 	struct dsi_cmd_desc *cmds = NULL;
 	struct dsi_display_mode_priv_info *priv_info = panel->cur_mode->priv_info;
 	int writeCmd[21] = {1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1};
@@ -933,7 +932,8 @@ bool dc_set_backlight(struct dsi_panel *panel, u32 bl_lvl)
 
 	if (panel->k6_dc_flag && panel->dc_enable && bl_lvl < panel->dc_threshold && bl_lvl != 0
 		&& !panel->in_aod && panel->doze_brightness == DOZE_BRIGHTNESS_INVALID) {
-		crcValue = 0.5 + mDCBLCoeff[0] * bl_lvl + mDCBLCoeff[1]; //0.5 is for roundin
+		/* fixed point: 0.5125 * bl_lvl + 4.9 + 0.5 (rounding) */
+		crcValue = (5125 * bl_lvl + 54000) / 10000;
 		if (crcValue > 255)
 			crcValue = 255;
 		else if (crcValue < panel->bl_config.bl_min_level)
