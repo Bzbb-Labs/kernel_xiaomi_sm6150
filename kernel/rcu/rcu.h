@@ -1,23 +1,10 @@
+/* SPDX-License-Identifier: GPL-2.0+ */
 /*
  * Read-Copy Update definitions shared among RCU implementations.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, you can access it online at
- * http://www.gnu.org/licenses/gpl-2.0.html.
- *
  * Copyright IBM Corporation, 2011
  *
- * Author: Paul E. McKenney <paulmck@linux.vnet.ibm.com>
+ * Author: Paul E. McKenney <paulmck@linux.ibm.com>
  */
 
 #ifndef __LINUX_RCU_H
@@ -30,31 +17,42 @@
 #define RCU_TRACE(stmt)
 #endif /* #else #ifdef CONFIG_RCU_TRACE */
 
-/*
- * Process-level increment to ->dynticks_nesting field.  This allows for
- * architectures that use half-interrupts and half-exceptions from
- * process context.
- *
- * DYNTICK_TASK_NEST_MASK defines a field of width DYNTICK_TASK_NEST_WIDTH
- * that counts the number of process-based reasons why RCU cannot
- * consider the corresponding CPU to be idle, and DYNTICK_TASK_NEST_VALUE
- * is the value used to increment or decrement this field.
- *
- * The rest of the bits could in principle be used to count interrupts,
- * but this would mean that a negative-one value in the interrupt
- * field could incorrectly zero out the DYNTICK_TASK_NEST_MASK field.
- * We therefore provide a two-bit guard field defined by DYNTICK_TASK_MASK
- * that is set to DYNTICK_TASK_FLAG upon initial exit from idle.
- * The DYNTICK_TASK_EXIT_IDLE value is thus the combined value used upon
- * initial exit from idle.
- */
-#define DYNTICK_TASK_NEST_WIDTH 7
-#define DYNTICK_TASK_NEST_VALUE ((LLONG_MAX >> DYNTICK_TASK_NEST_WIDTH) + 1)
-#define DYNTICK_TASK_NEST_MASK  (LLONG_MAX - DYNTICK_TASK_NEST_VALUE + 1)
-#define DYNTICK_TASK_FLAG	   ((DYNTICK_TASK_NEST_VALUE / 8) * 2)
-#define DYNTICK_TASK_MASK	   ((DYNTICK_TASK_NEST_VALUE / 8) * 3)
-#define DYNTICK_TASK_EXIT_IDLE	   (DYNTICK_TASK_NEST_VALUE + \
-				    DYNTICK_TASK_FLAG)
+#ifndef noinstr
+#define noinstr noinline notrace
+#endif
+
+#define instrumentation_begin() do { } while (0)
+#define instrumentation_end() do { } while (0)
+
+#ifndef IRQ_WORK_HARD_IRQ
+#define IRQ_WORK_HARD_IRQ	0
+#endif
+
+#ifndef swake_up_one
+#define swake_up_one(wq)	swake_up_all(wq)
+#endif
+
+#ifdef CONFIG_NO_HZ_FULL
+#define rcu_irq_enter_check_tick	__rcu_irq_enter_check_tick
+#else
+#define rcu_irq_enter_check_tick()	do { } while (0)
+#endif
+
+#ifndef HK_FLAG_RCU
+#define HK_FLAG_RCU		1
+#endif
+#ifndef housekeeping_affine
+#define housekeeping_affine(a, b)	do { } while (0)
+#endif
+#ifndef housekeeping_test_cpu
+#define housekeeping_test_cpu(a, b)	1
+#endif
+#ifndef housekeeping_any_cpu
+#define housekeeping_any_cpu(a)		smp_processor_id()
+#endif
+
+/* Offset to allow distinguishing irq vs. task-based idle entry/exit. */
+#define DYNTICK_IRQ_NONIDLE	((LONG_MAX / 2) + 1)
 
 
 /*
@@ -174,28 +172,13 @@ static inline void debug_rcu_head_unqueue(struct rcu_head *head)
 }
 #endif	/* #else !CONFIG_DEBUG_OBJECTS_RCU_HEAD */
 
-void kfree(const void *);
+extern int rcu_cpu_stall_suppress_at_boot;
+extern bool rcu_inkernel_boot_has_ended(void);
+extern void kfree_rcu_scheduler_running(void);
 
-/*
- * Reclaim the specified callback, either by invoking it (non-lazy case)
- * or freeing it directly (lazy case).  Return true if lazy, false otherwise.
- */
-static inline bool __rcu_reclaim(const char *rn, struct rcu_head *head)
+static inline bool rcu_stall_is_suppressed_at_boot(void)
 {
-	unsigned long offset = (unsigned long)head->func;
-
-	rcu_lock_acquire(&rcu_callback_map);
-	if (__is_kfree_rcu_offset(offset)) {
-		RCU_TRACE(trace_rcu_invoke_kfree_callback(rn, head, offset);)
-		kfree((void *)head - offset);
-		rcu_lock_release(&rcu_callback_map);
-		return true;
-	} else {
-		RCU_TRACE(trace_rcu_invoke_callback(rn, head);)
-		head->func(head);
-		rcu_lock_release(&rcu_callback_map);
-		return false;
-	}
+	return rcu_cpu_stall_suppress_at_boot && !rcu_inkernel_boot_has_ended();
 }
 
 #ifdef CONFIG_RCU_STALL_COMMON
@@ -203,6 +186,31 @@ static inline bool __rcu_reclaim(const char *rn, struct rcu_head *head)
 extern int rcu_cpu_stall_suppress;
 int rcu_jiffies_till_stall_check(void);
 
+static inline bool rcu_stall_is_suppressed(void)
+{
+	return rcu_stall_is_suppressed_at_boot() || rcu_cpu_stall_suppress;
+}
+
+#define rcu_ftrace_dump_stall_suppress() \
+do { \
+	if (!rcu_cpu_stall_suppress) \
+		rcu_cpu_stall_suppress = 3; \
+} while (0)
+
+#define rcu_ftrace_dump_stall_unsuppress() \
+do { \
+	if (rcu_cpu_stall_suppress == 3) \
+		rcu_cpu_stall_suppress = 0; \
+} while (0)
+
+#else /* #endif #ifdef CONFIG_RCU_STALL_COMMON */
+
+static inline bool rcu_stall_is_suppressed(void)
+{
+	return rcu_stall_is_suppressed_at_boot();
+}
+#define rcu_ftrace_dump_stall_suppress()
+#define rcu_ftrace_dump_stall_unsuppress()
 #endif /* #ifdef CONFIG_RCU_STALL_COMMON */
 
 /*
@@ -233,7 +241,7 @@ void rcu_test_sync_prims(void);
  */
 extern void resched_cpu(int cpu);
 
-#if defined(SRCU) || !defined(TINY_RCU)
+#if defined(CONFIG_SRCU) || !defined(CONFIG_TINY_RCU)
 
 #include <linux/rcu_node_tree.h>
 
@@ -251,6 +259,8 @@ static inline void rcu_init_levelspread(int *levelspread, const int *levelcnt)
 {
 	int i;
 
+	for (i = 0; i < RCU_NUM_LVLS; i++)
+		levelspread[i] = INT_MIN;
 	if (rcu_fanout_exact) {
 		levelspread[rcu_num_lvls - 1] = rcu_fanout_leaf;
 		for (i = rcu_num_lvls - 2; i >= 0; i--)
@@ -268,13 +278,16 @@ static inline void rcu_init_levelspread(int *levelspread, const int *levelcnt)
 	}
 }
 
-/*
- * Do a full breadth-first scan of the rcu_node structures for the
- * specified rcu_state structure.
- */
-#define rcu_for_each_node_breadth_first(rsp, rnp) \
-	for ((rnp) = &(rsp)->node[0]; \
-	     (rnp) < &(rsp)->node[rcu_num_nodes]; (rnp)++)
+extern void rcu_init_geometry(void);
+
+/* Returns a pointer to the first leaf rcu_node structure. */
+#define rcu_first_leaf_node() (rcu_state.level[rcu_num_lvls - 1])
+
+/* Is this rcu_node a leaf? */
+#define rcu_is_leaf_node(rnp) ((rnp)->level == rcu_num_lvls - 1)
+
+/* Is this rcu_node the last leaf? */
+#define rcu_is_last_leaf_node(rnp) ((rnp) == &rcu_state.node[rcu_num_nodes - 1])
 
 /*
  * Do a breadth-first scan of the non-leaf rcu_node structures for the
@@ -299,9 +312,21 @@ static inline void rcu_init_levelspread(int *levelspread, const int *levelcnt)
  * Iterate over all possible CPUs in a leaf RCU node.
  */
 #define for_each_leaf_node_possible_cpu(rnp, cpu) \
-	for ((cpu) = cpumask_next(rnp->grplo - 1, cpu_possible_mask); \
-	     cpu <= rnp->grphi; \
-	     cpu = cpumask_next((cpu), cpu_possible_mask))
+	for (WARN_ON_ONCE(!rcu_is_leaf_node(rnp)), \
+	     (cpu) = cpumask_next((rnp)->grplo - 1, cpu_possible_mask); \
+	     (cpu) <= rnp->grphi; \
+	     (cpu) = cpumask_next((cpu), cpu_possible_mask))
+
+/*
+ * Iterate over all CPUs in a leaf RCU node's specified mask.
+ */
+#define rcu_find_next_bit(rnp, cpu, mask) \
+	((rnp)->grplo + find_next_bit(&(mask), BITS_PER_LONG, (cpu)))
+#define for_each_leaf_node_cpu_mask(rnp, cpu, mask) \
+	for (WARN_ON_ONCE(!rcu_is_leaf_node(rnp)), \
+	     (cpu) = rcu_find_next_bit((rnp), 0, (mask)); \
+	     (cpu) <= rnp->grphi; \
+	     (cpu) = rcu_find_next_bit((rnp), (cpu) + 1 - (rnp->grplo), (mask)))
 
 /*
  * Wrappers for the rcu_node::lock acquire and release.
@@ -352,7 +377,10 @@ do {									\
 	___locked;							\
 })
 
-#endif /* #if defined(SRCU) || !defined(TINY_RCU) */
+#define raw_lockdep_assert_held_rcu_node(p)				\
+	lockdep_assert_held(&ACCESS_PRIVATE(p, lock))
+
+#endif /* #if defined(CONFIG_SRCU) || !defined(CONFIG_TINY_RCU) */
 
 #ifdef CONFIG_TINY_RCU
 /* Tiny RCU doesn't expedite, as its purpose in life is instead to be tiny. */
@@ -366,6 +394,8 @@ bool rcu_gp_is_expedited(void);  /* Internal RCU use. */
 void rcu_expedite_gp(void);
 void rcu_unexpedite_gp(void);
 void rcupdate_announce_bootup_oddness(void);
+void show_rcu_tasks_gp_kthreads(void);
+void rcu_request_urgent_qs_task(struct task_struct *t);
 #endif /* #else #ifdef CONFIG_TINY_RCU */
 
 #define RCU_SCHEDULER_INACTIVE	0
@@ -383,20 +413,22 @@ enum rcutorture_type {
 	RCU_BH_FLAVOR,
 	RCU_SCHED_FLAVOR,
 	RCU_TASKS_FLAVOR,
+	RCU_TASKS_RUDE_FLAVOR,
+	RCU_TASKS_TRACING_FLAVOR,
+	RCU_TRIVIAL_FLAVOR,
 	SRCU_FLAVOR,
 	INVALID_RCU_FLAVOR
 };
 
-#if defined(CONFIG_TREE_RCU) || defined(CONFIG_PREEMPT_RCU)
+#if defined(CONFIG_TREE_RCU)
 void rcutorture_get_gp_data(enum rcutorture_type test_type, int *flags,
-			    unsigned long *gpnum, unsigned long *completed);
-void rcutorture_record_test_transition(void);
-void rcutorture_record_progress(unsigned long vernum);
+			    unsigned long *gp_seq);
 void do_trace_rcu_torture_read(const char *rcutorturename,
 			       struct rcu_head *rhp,
 			       unsigned long secs,
 			       unsigned long c_old,
 			       unsigned long c);
+void rcu_gp_set_torture_wait(int duration);
 #else
 static inline void rcutorture_get_gp_data(enum rcutorture_type test_type,
 					  int *flags,
@@ -407,8 +439,6 @@ static inline void rcutorture_get_gp_data(enum rcutorture_type test_type,
 	*gpnum = 0;
 	*completed = 0;
 }
-static inline void rcutorture_record_test_transition(void) { }
-static inline void rcutorture_record_progress(unsigned long vernum) { }
 #ifdef CONFIG_RCU_TRACE
 void do_trace_rcu_torture_read(const char *rcutorturename,
 			       struct rcu_head *rhp,
@@ -419,6 +449,7 @@ void do_trace_rcu_torture_read(const char *rcutorturename,
 #define do_trace_rcu_torture_read(rcutorturename, rhp, secs, c_old, c) \
 	do { } while (0)
 #endif
+static inline void rcu_gp_set_torture_wait(int duration) { }
 #endif
 
 #ifdef CONFIG_TINY_SRCU
@@ -444,12 +475,8 @@ void srcutorture_get_gp_data(enum rcutorture_type test_type,
 #endif
 
 #ifdef CONFIG_TINY_RCU
-static inline unsigned long rcu_batches_started(void) { return 0; }
-static inline unsigned long rcu_batches_started_bh(void) { return 0; }
-static inline unsigned long rcu_batches_started_sched(void) { return 0; }
-static inline unsigned long rcu_batches_completed(void) { return 0; }
-static inline unsigned long rcu_batches_completed_bh(void) { return 0; }
-static inline unsigned long rcu_batches_completed_sched(void) { return 0; }
+static inline bool rcu_dynticks_zero_in_eqs(int cpu, int *vp) { return false; }
+static inline unsigned long rcu_get_gp_seq(void) { return 0; }
 static inline unsigned long rcu_exp_batches_completed(void) { return 0; }
 static inline unsigned long rcu_exp_batches_completed_sched(void) { return 0; }
 static inline unsigned long
@@ -459,14 +486,8 @@ static inline void rcu_bh_force_quiescent_state(void) { }
 static inline void rcu_sched_force_quiescent_state(void) { }
 static inline void show_rcu_gp_kthreads(void) { }
 #else /* #ifdef CONFIG_TINY_RCU */
-extern unsigned long rcutorture_testseq;
-extern unsigned long rcutorture_vernum;
-unsigned long rcu_batches_started(void);
-unsigned long rcu_batches_started_bh(void);
-unsigned long rcu_batches_started_sched(void);
-unsigned long rcu_batches_completed(void);
-unsigned long rcu_batches_completed_bh(void);
-unsigned long rcu_batches_completed_sched(void);
+bool rcu_dynticks_zero_in_eqs(int cpu, int *vp);
+unsigned long rcu_get_gp_seq(void);
 unsigned long rcu_exp_batches_completed(void);
 unsigned long rcu_exp_batches_completed_sched(void);
 unsigned long srcu_batches_completed(struct srcu_struct *sp);

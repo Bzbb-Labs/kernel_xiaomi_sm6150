@@ -1,24 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * Sleepable Read-Copy Update mechanism for mutual exclusion,
  *	tiny version for non-preemptible single-CPU use.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, you can access it online at
- * http://www.gnu.org/licenses/gpl-2.0.html.
- *
  * Copyright (C) IBM Corporation, 2017
  *
- * Author: Paul McKenney <paulmck@us.ibm.com>
+ * Author: Paul McKenney <paulmck@linux.ibm.com>
  */
 
 #include <linux/export.h>
@@ -37,15 +24,17 @@ int rcu_scheduler_active __read_mostly;
 
 static int init_srcu_struct_fields(struct srcu_struct *sp)
 {
-	sp->srcu_lock_nesting[0] = 0;
-	sp->srcu_lock_nesting[1] = 0;
-	init_swait_queue_head(&sp->srcu_wq);
-	sp->srcu_cb_head = NULL;
-	sp->srcu_cb_tail = &sp->srcu_cb_head;
-	sp->srcu_gp_running = false;
-	sp->srcu_gp_waiting = false;
-	sp->srcu_idx = 0;
-	INIT_WORK(&sp->srcu_work, srcu_drive_gp);
+	ssp->srcu_lock_nesting[0] = 0;
+	ssp->srcu_lock_nesting[1] = 0;
+	init_swait_queue_head(&ssp->srcu_wq);
+	ssp->srcu_cb_head = NULL;
+	ssp->srcu_cb_tail = &ssp->srcu_cb_head;
+	ssp->srcu_gp_running = false;
+	ssp->srcu_gp_waiting = false;
+	ssp->srcu_idx = 0;
+	ssp->srcu_idx_max = 0;
+	INIT_WORK(&ssp->srcu_work, srcu_drive_gp);
+	INIT_LIST_HEAD(&ssp->srcu_work.entry);
 	return 0;
 }
 
@@ -88,12 +77,14 @@ EXPORT_SYMBOL_GPL(init_srcu_struct);
  */
 void cleanup_srcu_struct(struct srcu_struct *sp)
 {
-	WARN_ON(sp->srcu_lock_nesting[0] || sp->srcu_lock_nesting[1]);
-	flush_work(&sp->srcu_work);
-	WARN_ON(sp->srcu_gp_running);
-	WARN_ON(sp->srcu_gp_waiting);
-	WARN_ON(sp->srcu_cb_head);
-	WARN_ON(&sp->srcu_cb_head != sp->srcu_cb_tail);
+	WARN_ON(ssp->srcu_lock_nesting[0] || ssp->srcu_lock_nesting[1]);
+	flush_work(&ssp->srcu_work);
+	WARN_ON(ssp->srcu_gp_running);
+	WARN_ON(ssp->srcu_gp_waiting);
+	WARN_ON(ssp->srcu_cb_head);
+	WARN_ON(&ssp->srcu_cb_head != ssp->srcu_cb_tail);
+	WARN_ON(ssp->srcu_idx != ssp->srcu_idx_max);
+	WARN_ON(ssp->srcu_idx & 0x1);
 }
 EXPORT_SYMBOL_GPL(cleanup_srcu_struct);
 
@@ -105,9 +96,9 @@ void __srcu_read_unlock(struct srcu_struct *sp, int idx)
 {
 	int newval = sp->srcu_lock_nesting[idx] - 1;
 
-	WRITE_ONCE(sp->srcu_lock_nesting[idx], newval);
-	if (!newval && READ_ONCE(sp->srcu_gp_waiting))
-		swake_up(&sp->srcu_wq);
+	WRITE_ONCE(ssp->srcu_lock_nesting[idx], newval);
+	if (!newval && READ_ONCE(ssp->srcu_gp_waiting))
+		swake_up_one(&ssp->srcu_wq);
 }
 EXPORT_SYMBOL_GPL(__srcu_read_unlock);
 
@@ -123,8 +114,8 @@ void srcu_drive_gp(struct work_struct *wp)
 	struct rcu_head *rhp;
 	struct srcu_struct *sp;
 
-	sp = container_of(wp, struct srcu_struct, srcu_work);
-	if (sp->srcu_gp_running || !READ_ONCE(sp->srcu_cb_head))
+	ssp = container_of(wp, struct srcu_struct, srcu_work);
+	if (ssp->srcu_gp_running || USHORT_CMP_GE(ssp->srcu_idx, READ_ONCE(ssp->srcu_idx_max)))
 		return; /* Already running or nothing to do. */
 
 	/* Remove recently arrived callbacks and wait for readers. */
@@ -134,11 +125,12 @@ void srcu_drive_gp(struct work_struct *wp)
 	sp->srcu_cb_head = NULL;
 	sp->srcu_cb_tail = &sp->srcu_cb_head;
 	local_irq_enable();
-	idx = sp->srcu_idx;
-	WRITE_ONCE(sp->srcu_idx, !sp->srcu_idx);
-	WRITE_ONCE(sp->srcu_gp_waiting, true);  /* srcu_read_unlock() wakes! */
-	swait_event(sp->srcu_wq, !READ_ONCE(sp->srcu_lock_nesting[idx]));
-	WRITE_ONCE(sp->srcu_gp_waiting, false); /* srcu_read_unlock() cheap. */
+	idx = (ssp->srcu_idx & 0x2) / 2;
+	WRITE_ONCE(ssp->srcu_idx, ssp->srcu_idx + 1);
+	WRITE_ONCE(ssp->srcu_gp_waiting, true);  /* srcu_read_unlock() wakes! */
+	swait_event_exclusive(ssp->srcu_wq, !READ_ONCE(ssp->srcu_lock_nesting[idx]));
+	WRITE_ONCE(ssp->srcu_gp_waiting, false); /* srcu_read_unlock() cheap. */
+	WRITE_ONCE(ssp->srcu_idx, ssp->srcu_idx + 1);
 
 	/* Invoke the callbacks we removed above. */
 	while (lh) {
@@ -155,11 +147,27 @@ void srcu_drive_gp(struct work_struct *wp)
 	 * at interrupt level, but the ->srcu_gp_running checks will
 	 * straighten that out.
 	 */
-	WRITE_ONCE(sp->srcu_gp_running, false);
-	if (READ_ONCE(sp->srcu_cb_head))
-		schedule_work(&sp->srcu_work);
+	WRITE_ONCE(ssp->srcu_gp_running, false);
+	if (USHORT_CMP_LT(ssp->srcu_idx, READ_ONCE(ssp->srcu_idx_max)))
+		schedule_work(&ssp->srcu_work);
 }
 EXPORT_SYMBOL_GPL(srcu_drive_gp);
+
+static void srcu_gp_start_if_needed(struct srcu_struct *ssp)
+{
+	unsigned short cookie;
+
+	cookie = get_state_synchronize_srcu(ssp);
+	if (USHORT_CMP_GE(READ_ONCE(ssp->srcu_idx_max), cookie))
+		return;
+	WRITE_ONCE(ssp->srcu_idx_max, cookie);
+	if (!READ_ONCE(ssp->srcu_gp_running)) {
+		if (likely(srcu_init_done))
+			schedule_work(&ssp->srcu_work);
+		else if (list_empty(&ssp->srcu_work.entry))
+			list_add(&ssp->srcu_work.entry, &srcu_boot_list);
+	}
+}
 
 /*
  * Enqueue an SRCU callback on the specified srcu_struct structure,
@@ -176,8 +184,7 @@ void call_srcu(struct srcu_struct *sp, struct rcu_head *rhp,
 	*sp->srcu_cb_tail = rhp;
 	sp->srcu_cb_tail = &rhp->next;
 	local_irq_restore(flags);
-	if (!READ_ONCE(sp->srcu_gp_running))
-		schedule_work(&sp->srcu_work);
+	srcu_gp_start_if_needed(ssp);
 }
 EXPORT_SYMBOL_GPL(call_srcu);
 
@@ -195,6 +202,48 @@ void synchronize_srcu(struct srcu_struct *sp)
 	destroy_rcu_head_on_stack(&rs.head);
 }
 EXPORT_SYMBOL_GPL(synchronize_srcu);
+
+/*
+ * get_state_synchronize_srcu - Provide an end-of-grace-period cookie
+ */
+unsigned long get_state_synchronize_srcu(struct srcu_struct *ssp)
+{
+	unsigned long ret;
+
+	barrier();
+	ret = (READ_ONCE(ssp->srcu_idx) + 3) & ~0x1;
+	barrier();
+	return ret & USHRT_MAX;
+}
+EXPORT_SYMBOL_GPL(get_state_synchronize_srcu);
+
+/*
+ * start_poll_synchronize_srcu - Provide cookie and start grace period
+ *
+ * The difference between this and get_state_synchronize_srcu() is that
+ * this function ensures that the poll_state_synchronize_srcu() will
+ * eventually return the value true.
+ */
+unsigned long start_poll_synchronize_srcu(struct srcu_struct *ssp)
+{
+	unsigned long ret = get_state_synchronize_srcu(ssp);
+
+	srcu_gp_start_if_needed(ssp);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(start_poll_synchronize_srcu);
+
+/*
+ * poll_state_synchronize_srcu - Has cookie's grace period ended?
+ */
+bool poll_state_synchronize_srcu(struct srcu_struct *ssp, unsigned long cookie)
+{
+	bool ret = USHORT_CMP_GE(READ_ONCE(ssp->srcu_idx), cookie);
+
+	barrier();
+	return ret;
+}
+EXPORT_SYMBOL_GPL(poll_state_synchronize_srcu);
 
 /* Lockdep diagnostics.  */
 void __init rcu_scheduler_starting(void)
