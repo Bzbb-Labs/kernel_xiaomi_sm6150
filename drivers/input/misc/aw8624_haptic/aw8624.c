@@ -2260,6 +2260,25 @@ static enum hrtimer_restart aw8624_vibrator_timer_func(struct hrtimer *timer)
 	return HRTIMER_NORESTART;
 }
 
+static void aw8624_haptic_set_ram_donei(struct aw8624 *aw8624, bool flag)
+{
+	if (flag) {
+		aw8624_i2c_write_bits(aw8624, AW8624_REG_DBGCTRL,
+			AW8624_BIT_DBGCTRL_INTN_TRG_SEL_MASK,
+			AW8624_BIT_DBGCTRL_INTN_SEL_ENABLE);
+		aw8624_i2c_write_bits(aw8624, AW8624_REG_SYSINTM,
+			AW8624_BIT_SYSINTM_DONE_MASK,
+			AW8624_BIT_SYSINTM_DONE_EN);
+	} else {
+		aw8624_i2c_write_bits(aw8624, AW8624_REG_SYSINTM,
+			AW8624_BIT_SYSINTM_FF_AE_MASK,
+			AW8624_BIT_SYSINTM_DONE_OFF);
+		aw8624_i2c_write_bits(aw8624, AW8624_REG_DBGCTRL,
+			AW8624_BIT_DBGCTRL_INTN_TRG_SEL_MASK,
+			AW8624_BIT_DBGCTRL_TRG_SEL_ENABLE);
+	}
+}
+
 static void aw8624_vibrator_work_routine(struct work_struct *work)
 {
 	struct aw8624 *aw8624 =
@@ -2360,6 +2379,7 @@ static irqreturn_t aw8624_irq(int irq, void *data)
 	struct aw8624 *aw8624 = data;
 	unsigned char reg_val = 0;
 	unsigned char dbg_val = 0;
+	unsigned char glb_st = 0;
 	unsigned int buf_len = 0;
 
 	pr_debug("%s: enter\n", __func__);
