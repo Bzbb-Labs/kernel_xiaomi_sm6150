@@ -48,11 +48,8 @@ static inline void rcu_virt_note_context_switch(int cpu)
 void synchronize_rcu_bh(void);
 void synchronize_sched_expedited(void);
 void synchronize_rcu_expedited(void);
-void kvfree_call_rcu(struct rcu_head *head, rcu_callback_t func);
-static inline void kfree_call_rcu(struct rcu_head *head, rcu_callback_t func)
-{
-	kvfree_call_rcu(head, func);
-}
+
+void kfree_call_rcu(struct rcu_head *head, rcu_callback_t func);
 
 /**
  * synchronize_rcu_bh_expedited - Brute-force RCU-bh grace period
