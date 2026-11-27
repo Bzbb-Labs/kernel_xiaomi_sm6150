@@ -1,13 +1,26 @@
-// SPDX-License-Identifier: GPL-2.0+
 /*
  * Read-Copy Update mechanism for mutual exclusion
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, you can access it online at
+ * http://www.gnu.org/licenses/gpl-2.0.html.
  *
  * Copyright IBM Corporation, 2001
  *
  * Authors: Dipankar Sarma <dipankar@in.ibm.com>
  *	    Manfred Spraul <manfred@colorfullife.com>
  *
- * Based on the original work by Paul McKenney <paulmck@linux.ibm.com>
+ * Based on the original work by Paul McKenney <paulmck@us.ibm.com>
  * and inputs from Rusty Russell, Andrea Arcangeli and Andi Kleen.
  * Papers:
  * http://www.rdrop.com/users/paulmck/paper/rclockpdcsproof.pdf
@@ -39,11 +52,6 @@
 #include <linux/tick.h>
 #include <linux/rcupdate_wait.h>
 
-#include <linux/kprobes.h>
-#include <linux/slab.h>
-#include <linux/irq_work.h>
-#include <linux/rcupdate_trace.h>
-
 #define CREATE_TRACE_POINTS
 
 #include "rcu.h"
@@ -53,23 +61,10 @@
 #endif
 #define MODULE_PARAM_PREFIX "rcupdate."
 
-#ifndef data_race
-#define data_race(expr)							\
-	({								\
-		expr;							\
-	})
-#endif
-#ifndef ASSERT_EXCLUSIVE_WRITER
-#define ASSERT_EXCLUSIVE_WRITER(var) do { } while (0)
-#endif
-#ifndef ASSERT_EXCLUSIVE_ACCESS
-#define ASSERT_EXCLUSIVE_ACCESS(var) do { } while (0)
-#endif
-
 #ifndef CONFIG_TINY_RCU
-int rcu_expedited;
+extern int rcu_expedited; /* from sysctl */
 module_param(rcu_expedited, int, 0);
-int rcu_normal;
+extern int rcu_normal; /* from sysctl */
 module_param(rcu_normal, int, 0);
 static int rcu_normal_after_boot;
 module_param(rcu_normal_after_boot, int, 0);
@@ -80,12 +75,12 @@ module_param(rcu_normal_after_boot, int, 0);
  * rcu_read_lock_held_common() - might we be in RCU-sched read-side critical section?
  * @ret:	Best guess answer if lockdep cannot be relied on
  *
- * Returns true if lockdep must be ignored, in which case ``*ret`` contains
+ * Returns true if lockdep must be ignored, in which case *ret contains
  * the best guess described below.  Otherwise returns false, in which
- * case ``*ret`` tells the caller nothing and the caller should instead
+ * case *ret tells the caller nothing and the caller should instead
  * consult lockdep.
  *
- * If CONFIG_DEBUG_LOCK_ALLOC is selected, set ``*ret`` to nonzero iff in an
+ * If CONFIG_DEBUG_LOCK_ALLOC is selected, set *ret to nonzero iff in an
  * RCU-sched read-side critical section.  In absence of
  * CONFIG_DEBUG_LOCK_ALLOC, this assumes we are in an RCU-sched read-side
  * critical section unless it can prove otherwise.  Note that disabling
@@ -99,7 +94,7 @@ module_param(rcu_normal_after_boot, int, 0);
  *
  * Note that if the CPU is in the idle loop from an RCU point of view (ie:
  * that we are in the section between rcu_idle_enter() and rcu_idle_exit())
- * then rcu_read_lock_held() sets ``*ret`` to false even if the CPU did an
+ * then rcu_read_lock_held() sets *ret to false even if the CPU did an
  * rcu_read_lock().  The reason for this is that RCU ignores CPUs that are
  * in such a section, considering these as in extended quiescent state,
  * so such a CPU is effectively never in an RCU read-side critical section
@@ -115,15 +110,15 @@ module_param(rcu_normal_after_boot, int, 0);
 static bool rcu_read_lock_held_common(bool *ret)
 {
 	if (!debug_lockdep_rcu_enabled()) {
-		*ret = true;
+		*ret = 1;
 		return true;
 	}
 	if (!rcu_is_watching()) {
-		*ret = false;
+		*ret = 0;
 		return true;
 	}
 	if (!rcu_lockdep_current_cpu_online()) {
-		*ret = false;
+		*ret = 0;
 		return true;
 	}
 	return false;
@@ -201,8 +196,6 @@ void rcu_unexpedite_gp(void)
 }
 EXPORT_SYMBOL_GPL(rcu_unexpedite_gp);
 
-static bool rcu_boot_ended __read_mostly;
-
 /*
  * Inform RCU of the end of the in-kernel boot sequence.
  */
@@ -211,17 +204,7 @@ void rcu_end_inkernel_boot(void)
 	rcu_unexpedite_gp();
 	if (rcu_normal_after_boot)
 		WRITE_ONCE(rcu_normal, 1);
-	rcu_boot_ended = true;
 }
-
-/*
- * Let rcutorture know when it is OK to turn it up to eleven.
- */
-bool rcu_inkernel_boot_has_ended(void)
-{
-	return rcu_boot_ended;
-}
-EXPORT_SYMBOL_GPL(rcu_inkernel_boot_has_ended);
 
 #endif /* #ifndef CONFIG_TINY_RCU */
 
@@ -251,7 +234,6 @@ static int __init rcu_set_runtime_mode(void)
 {
 	rcu_test_sync_prims();
 	rcu_scheduler_active = RCU_SCHEDULER_RUNNING;
-	kfree_rcu_scheduler_running();
 	rcu_test_sync_prims();
 	return 0;
 }
@@ -323,15 +305,14 @@ struct lockdep_map rcu_sched_lock_map =
 	STATIC_LOCKDEP_MAP_INIT("rcu_read_lock_sched", &rcu_sched_lock_key);
 EXPORT_SYMBOL_GPL(rcu_sched_lock_map);
 
-// Tell lockdep when RCU callbacks are being invoked.
 static struct lock_class_key rcu_callback_key;
 struct lockdep_map rcu_callback_map =
 	STATIC_LOCKDEP_MAP_INIT("rcu_callback", &rcu_callback_key);
 EXPORT_SYMBOL_GPL(rcu_callback_map);
 
-noinstr int notrace debug_lockdep_rcu_enabled(void)
+int notrace debug_lockdep_rcu_enabled(void)
 {
-	return rcu_scheduler_active != RCU_SCHEDULER_INACTIVE && READ_ONCE(debug_locks) &&
+	return rcu_scheduler_active != RCU_SCHEDULER_INACTIVE && debug_locks &&
 	       current->lockdep_recursion == 0;
 }
 EXPORT_SYMBOL_GPL(debug_lockdep_rcu_enabled);
@@ -436,14 +417,13 @@ void __wait_rcu_gp(bool checktiny, int n, call_rcu_func_t *crcu_array,
 			might_sleep();
 			continue;
 		}
+		init_rcu_head_on_stack(&rs_array[i].head);
+		init_completion(&rs_array[i].completion);
 		for (j = 0; j < i; j++)
 			if (crcu_array[j] == crcu_array[i])
 				break;
-		if (j == i) {
-			init_rcu_head_on_stack(&rs_array[i].head);
-			init_completion(&rs_array[i].completion);
+		if (j == i)
 			(crcu_array[i])(&rs_array[i].head, wakeme_after_rcu);
-		}
 	}
 
 	/* Wait for all callbacks to be invoked. */
@@ -455,10 +435,9 @@ void __wait_rcu_gp(bool checktiny, int n, call_rcu_func_t *crcu_array,
 		for (j = 0; j < i; j++)
 			if (crcu_array[j] == crcu_array[i])
 				break;
-		if (j == i) {
+		if (j == i)
 			wait_for_completion(&rs_array[i].completion);
-			destroy_rcu_head_on_stack(&rs_array[i].head);
-		}
+		destroy_rcu_head_on_stack(&rs_array[i].head);
 	}
 }
 EXPORT_SYMBOL_GPL(__wait_rcu_gp);
@@ -521,7 +500,7 @@ struct debug_obj_descr rcuhead_debug_descr = {
 EXPORT_SYMBOL_GPL(rcuhead_debug_descr);
 #endif /* #ifdef CONFIG_DEBUG_OBJECTS_RCU_HEAD */
 
-#if defined(CONFIG_TREE_RCU) || defined(CONFIG_RCU_TRACE)
+#if defined(CONFIG_TREE_RCU) || defined(CONFIG_PREEMPT_RCU) || defined(CONFIG_RCU_TRACE)
 void do_trace_rcu_torture_read(const char *rcutorturename, struct rcu_head *rhp,
 			       unsigned long secs,
 			       unsigned long c_old, unsigned long c)
@@ -542,19 +521,60 @@ EXPORT_SYMBOL_GPL(do_trace_rcu_torture_read);
 #define RCU_STALL_DELAY_DELTA	       0
 #endif
 
-#ifdef CONFIG_RCU_STALL_COMMON
-int rcu_cpu_stall_ftrace_dump __read_mostly;
-module_param(rcu_cpu_stall_ftrace_dump, int, 0644);
-int rcu_cpu_stall_suppress __read_mostly; // !0 = suppress stall warnings.
-EXPORT_SYMBOL_GPL(rcu_cpu_stall_suppress);
+int rcu_cpu_stall_suppress __read_mostly; /* 1 = suppress stall warnings. */
+static int rcu_cpu_stall_timeout __read_mostly = CONFIG_RCU_CPU_STALL_TIMEOUT;
+
 module_param(rcu_cpu_stall_suppress, int, 0644);
 module_param(rcu_cpu_stall_timeout, int, 0644);
 
-// Suppress boot-time RCU CPU stall warnings and rcutorture writer stall
-// warnings.  Also used by rcutorture even if stall warnings are excluded.
-int rcu_cpu_stall_suppress_at_boot __read_mostly; // !0 = suppress boot stalls.
-EXPORT_SYMBOL_GPL(rcu_cpu_stall_suppress_at_boot);
-module_param(rcu_cpu_stall_suppress_at_boot, int, 0444);
+int rcu_jiffies_till_stall_check(void)
+{
+	int till_stall_check = READ_ONCE(rcu_cpu_stall_timeout);
+
+	/*
+	 * Limit check must be consistent with the Kconfig limits
+	 * for CONFIG_RCU_CPU_STALL_TIMEOUT.
+	 */
+	if (till_stall_check < 3) {
+		WRITE_ONCE(rcu_cpu_stall_timeout, 3);
+		till_stall_check = 3;
+	} else if (till_stall_check > 300) {
+		WRITE_ONCE(rcu_cpu_stall_timeout, 300);
+		till_stall_check = 300;
+	}
+	return till_stall_check * HZ + RCU_STALL_DELAY_DELTA;
+}
+
+void rcu_sysrq_start(void)
+{
+	if (!rcu_cpu_stall_suppress)
+		rcu_cpu_stall_suppress = 2;
+}
+
+void rcu_sysrq_end(void)
+{
+	if (rcu_cpu_stall_suppress == 2)
+		rcu_cpu_stall_suppress = 0;
+}
+
+static int rcu_panic(struct notifier_block *this, unsigned long ev, void *ptr)
+{
+	rcu_cpu_stall_suppress = 1;
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block rcu_panic_block = {
+	.notifier_call = rcu_panic,
+};
+
+static int __init check_cpu_stall_init(void)
+{
+	atomic_notifier_chain_register(&panic_notifier_list, &rcu_panic_block);
+	return 0;
+}
+early_initcall(check_cpu_stall_init);
+
+#endif /* #ifdef CONFIG_RCU_STALL_COMMON */
 
 #ifdef CONFIG_PROVE_RCU
 
@@ -577,24 +597,25 @@ static void test_callback(struct rcu_head *r)
 	pr_info("RCU test callback executed %d\n", rcu_self_test_counter);
 }
 
-DEFINE_STATIC_SRCU(early_srcu);
-
-struct early_boot_kfree_rcu {
-	struct rcu_head rh;
-};
-
 static void early_boot_test_call_rcu(void)
 {
 	static struct rcu_head head;
-	static struct rcu_head shead;
-	struct early_boot_kfree_rcu *rhp;
 
 	call_rcu(&head, test_callback);
-	if (IS_ENABLED(CONFIG_SRCU))
-		call_srcu(&early_srcu, &shead, test_callback);
-	rhp = kmalloc(sizeof(*rhp), GFP_KERNEL);
-	if (!WARN_ON_ONCE(!rhp))
-		kfree_rcu(rhp, rh);
+}
+
+static void early_boot_test_call_rcu_bh(void)
+{
+	static struct rcu_head head;
+
+	call_rcu_bh(&head, test_callback);
+}
+
+static void early_boot_test_call_rcu_sched(void)
+{
+	static struct rcu_head head;
+
+	call_rcu_sched(&head, test_callback);
 }
 
 void rcu_early_boot_tests(void)

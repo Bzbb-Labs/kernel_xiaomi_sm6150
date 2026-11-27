@@ -1,11 +1,24 @@
-// SPDX-License-Identifier: GPL-2.0+
 /*
  * Sleepable Read-Copy Update mechanism for mutual exclusion.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, you can access it online at
+ * http://www.gnu.org/licenses/gpl-2.0.html.
  *
  * Copyright (C) IBM Corporation, 2006
  * Copyright (C) Fujitsu, 2012
  *
- * Authors: Paul McKenney <paulmck@linux.ibm.com>
+ * Author: Paul McKenney <paulmck@us.ibm.com>
  *	   Lai Jiangshan <laijs@cn.fujitsu.com>
  *
  * For detailed explanation of Read-Copy Update mechanism see -
@@ -26,20 +39,6 @@
 
 #include "rcu.h"
 #include "rcu_segcblist.h"
-
-#ifndef data_race
-#define data_race(expr)							\
-	({								\
-		expr;							\
-	})
-#endif
-#ifndef ASSERT_EXCLUSIVE_WRITER
-#define ASSERT_EXCLUSIVE_WRITER(var) do { } while (0)
-#endif
-#ifndef ASSERT_EXCLUSIVE_ACCESS
-#define ASSERT_EXCLUSIVE_ACCESS(var) do { } while (0)
-#endif
-
 
 /* Holdoff in nanoseconds for auto-expediting. */
 #define DEFAULT_SRCU_EXP_HOLDOFF (25 * 1000)
@@ -69,9 +68,6 @@ static void init_srcu_struct_nodes(struct srcu_struct *sp, bool is_static)
 	struct srcu_data *sdp;
 	struct srcu_node *snp;
 	struct srcu_node *snp_first;
-
-	/* Initialize geometry if it has not already been initialized. */
-	rcu_init_geometry();
 
 	/* Work out the overall tree geometry. */
 	sp->level[0] = &sp->node[0];
@@ -423,8 +419,8 @@ static void srcu_gp_start(struct srcu_struct *sp)
 	(void)rcu_segcblist_accelerate(&sdp->srcu_cblist,
 				       rcu_seq_snap(&sp->srcu_gp_seq));
 	smp_mb(); /* Order prior store to ->srcu_gp_seq_needed vs. GP start. */
-	rcu_seq_start(&ssp->srcu_gp_seq);
-	state = rcu_seq_state(ssp->srcu_gp_seq);
+	rcu_seq_start(&sp->srcu_gp_seq);
+	state = rcu_seq_state(READ_ONCE(sp->srcu_gp_seq));
 	WARN_ON_ONCE(state != SRCU_STATE_SCAN1);
 }
 
@@ -519,14 +515,14 @@ static void srcu_gp_end(struct srcu_struct *sp)
 	raw_spin_lock_irq_rcu_node(sp);
 	idx = rcu_seq_state(sp->srcu_gp_seq);
 	WARN_ON_ONCE(idx != SRCU_STATE_SCAN2);
-	cbdelay = srcu_get_delay(ssp);
-	WRITE_ONCE(ssp->srcu_last_gp_end, ktime_get_mono_fast_ns());
-	rcu_seq_end(&ssp->srcu_gp_seq);
-	gpseq = rcu_seq_current(&ssp->srcu_gp_seq);
-	if (ULONG_CMP_LT(ssp->srcu_gp_seq_needed_exp, gpseq))
-		WRITE_ONCE(ssp->srcu_gp_seq_needed_exp, gpseq);
-	spin_unlock_irq_rcu_node(ssp);
-	mutex_unlock(&ssp->srcu_gp_mutex);
+	cbdelay = srcu_get_delay(sp);
+	sp->srcu_last_gp_end = ktime_get_mono_fast_ns();
+	rcu_seq_end(&sp->srcu_gp_seq);
+	gpseq = rcu_seq_current(&sp->srcu_gp_seq);
+	if (ULONG_CMP_LT(sp->srcu_gp_seq_needed_exp, gpseq))
+		sp->srcu_gp_seq_needed_exp = gpseq;
+	raw_spin_unlock_irq_rcu_node(sp);
+	mutex_unlock(&sp->srcu_gp_mutex);
 	/* A new grace period can start at this point.  But only one. */
 
 	/* Initiate callback invocation as needed. */
@@ -540,7 +536,7 @@ static void srcu_gp_end(struct srcu_struct *sp)
 		snp->srcu_have_cbs[idx] = gpseq;
 		rcu_seq_set_state(&snp->srcu_have_cbs[idx], 1);
 		if (ULONG_CMP_LT(snp->srcu_gp_seq_needed_exp, gpseq))
-			WRITE_ONCE(snp->srcu_gp_seq_needed_exp, gpseq);
+			snp->srcu_gp_seq_needed_exp = gpseq;
 		mask = snp->srcu_data_have_cbs[idx];
 		snp->srcu_data_have_cbs[idx] = 0;
 		raw_spin_unlock_irq_rcu_node(snp);
@@ -601,10 +597,10 @@ static void srcu_funnel_exp_start(struct srcu_struct *sp, struct srcu_node *snp,
 		WRITE_ONCE(snp->srcu_gp_seq_needed_exp, s);
 		raw_spin_unlock_irqrestore_rcu_node(snp, flags);
 	}
-	spin_lock_irqsave_rcu_node(ssp, flags);
-	if (ULONG_CMP_LT(ssp->srcu_gp_seq_needed_exp, s))
-		WRITE_ONCE(ssp->srcu_gp_seq_needed_exp, s);
-	spin_unlock_irqrestore_rcu_node(ssp, flags);
+	raw_spin_lock_irqsave_rcu_node(sp, flags);
+	if (!ULONG_CMP_LT(sp->srcu_gp_seq_needed_exp, s))
+		sp->srcu_gp_seq_needed_exp = s;
+	raw_spin_unlock_irqrestore_rcu_node(sp, flags);
 }
 
 /*
@@ -646,8 +642,8 @@ static void srcu_funnel_gp_start(struct srcu_struct *sp, struct srcu_data *sdp,
 		if (snp == sdp->mynode)
 			snp->srcu_data_have_cbs[idx] |= sdp->grpmask;
 		if (!do_norm && ULONG_CMP_LT(snp->srcu_gp_seq_needed_exp, s))
-			WRITE_ONCE(snp->srcu_gp_seq_needed_exp, s);
-		spin_unlock_irqrestore_rcu_node(snp, flags);
+			snp->srcu_gp_seq_needed_exp = s;
+		raw_spin_unlock_irqrestore_rcu_node(snp, flags);
 	}
 
 	/* Top of tree, must ensure the grace period will be started. */
@@ -659,8 +655,8 @@ static void srcu_funnel_gp_start(struct srcu_struct *sp, struct srcu_data *sdp,
 		 */
 		smp_store_release(&sp->srcu_gp_seq_needed, s); /*^^^*/
 	}
-	if (!do_norm && ULONG_CMP_LT(ssp->srcu_gp_seq_needed_exp, s))
-		WRITE_ONCE(ssp->srcu_gp_seq_needed_exp, s);
+	if (!do_norm && ULONG_CMP_LT(sp->srcu_gp_seq_needed_exp, s))
+		sp->srcu_gp_seq_needed_exp = s;
 
 	/* If grace period not already done and none in progress, start it. */
 	if (!rcu_seq_done(&sp->srcu_gp_seq, s) &&
@@ -735,7 +731,7 @@ static void srcu_flip(struct srcu_struct *sp)
  * it, if this function was preempted for enough time for the counters
  * to wrap, it really doesn't matter whether or not we expedite the grace
  * period.  The extra overhead of a needlessly expedited grace period is
- * negligible when amortized over that time period, and the extra latency
+ * negligible when amoritized over that time period, and the extra latency
  * of a needlessly non-expedited grace period is similarly negligible.
  */
 static bool srcu_might_be_idle(struct srcu_struct *sp)
@@ -745,15 +741,14 @@ static bool srcu_might_be_idle(struct srcu_struct *sp)
 	struct srcu_data *sdp;
 	unsigned long t;
 
-	check_init_srcu_struct(ssp);
 	/* If the local srcu_data structure has callbacks, not idle.  */
-	sdp = raw_cpu_ptr(ssp->sda);
-	spin_lock_irqsave_rcu_node(sdp, flags);
+	local_irq_save(flags);
+	sdp = this_cpu_ptr(sp->sda);
 	if (rcu_segcblist_pend_cbs(&sdp->srcu_cblist)) {
-		spin_unlock_irqrestore_rcu_node(sdp, flags);
+		local_irq_restore(flags);
 		return false; /* Callbacks already present, so not idle. */
 	}
-	spin_unlock_irqrestore_rcu_node(sdp, flags);
+	local_irq_restore(flags);
 
 	/*
 	 * No local callbacks, so probabalistically probe global state.
@@ -787,46 +782,6 @@ static void srcu_leak_callback(struct rcu_head *rhp)
 }
 
 /*
- * Start an SRCU grace period, and also queue the callback if non-NULL.
- */
-static unsigned long srcu_gp_start_if_needed(struct srcu_struct *ssp,
-					     struct rcu_head *rhp, bool do_norm)
-{
-	unsigned long flags;
-	int idx;
-	bool needexp = false;
-	bool needgp = false;
-	unsigned long s;
-	struct srcu_data *sdp;
-
-	check_init_srcu_struct(ssp);
-	idx = srcu_read_lock(ssp);
-	sdp = raw_cpu_ptr(ssp->sda);
-	spin_lock_irqsave_rcu_node(sdp, flags);
-	if (rhp)
-		rcu_segcblist_enqueue(&sdp->srcu_cblist, rhp);
-	rcu_segcblist_advance(&sdp->srcu_cblist,
-			      rcu_seq_current(&ssp->srcu_gp_seq));
-	s = rcu_seq_snap(&ssp->srcu_gp_seq);
-	(void)rcu_segcblist_accelerate(&sdp->srcu_cblist, s);
-	if (ULONG_CMP_LT(sdp->srcu_gp_seq_needed, s)) {
-		sdp->srcu_gp_seq_needed = s;
-		needgp = true;
-	}
-	if (!do_norm && ULONG_CMP_LT(sdp->srcu_gp_seq_needed_exp, s)) {
-		sdp->srcu_gp_seq_needed_exp = s;
-		needexp = true;
-	}
-	spin_unlock_irqrestore_rcu_node(sdp, flags);
-	if (needgp)
-		srcu_funnel_gp_start(ssp, sdp, s, do_norm);
-	else if (needexp)
-		srcu_funnel_exp_start(ssp, sdp->mynode, s);
-	srcu_read_unlock(ssp, idx);
-	return s;
-}
-
-/*
  * Enqueue an SRCU callback on the srcu_data structure associated with
  * the current CPU and the specified srcu_struct structure, initiating
  * grace-period processing if it is not already running.
@@ -857,6 +812,13 @@ static unsigned long srcu_gp_start_if_needed(struct srcu_struct *ssp,
 void __call_srcu(struct srcu_struct *sp, struct rcu_head *rhp,
 		 rcu_callback_t func, bool do_norm)
 {
+	unsigned long flags;
+	bool needexp = false;
+	bool needgp = false;
+	unsigned long s;
+	struct srcu_data *sdp;
+
+	check_init_srcu_struct(sp);
 	if (debug_rcu_head_queue(rhp)) {
 		/* Probable double call_srcu(), so leak the callback. */
 		WRITE_ONCE(rhp->func, srcu_leak_callback);
@@ -864,7 +826,27 @@ void __call_srcu(struct srcu_struct *sp, struct rcu_head *rhp,
 		return;
 	}
 	rhp->func = func;
-	(void)srcu_gp_start_if_needed(ssp, rhp, do_norm);
+	local_irq_save(flags);
+	sdp = this_cpu_ptr(sp->sda);
+	raw_spin_lock_rcu_node(sdp);
+	rcu_segcblist_enqueue(&sdp->srcu_cblist, rhp, false);
+	rcu_segcblist_advance(&sdp->srcu_cblist,
+			      rcu_seq_current(&sp->srcu_gp_seq));
+	s = rcu_seq_snap(&sp->srcu_gp_seq);
+	(void)rcu_segcblist_accelerate(&sdp->srcu_cblist, s);
+	if (ULONG_CMP_LT(sdp->srcu_gp_seq_needed, s)) {
+		sdp->srcu_gp_seq_needed = s;
+		needgp = true;
+	}
+	if (!do_norm && ULONG_CMP_LT(sdp->srcu_gp_seq_needed_exp, s)) {
+		sdp->srcu_gp_seq_needed_exp = s;
+		needexp = true;
+	}
+	raw_spin_unlock_irqrestore_rcu_node(sdp, flags);
+	if (needgp)
+		srcu_funnel_gp_start(sp, sdp, s, do_norm);
+	else if (needexp)
+		srcu_funnel_exp_start(sp, sdp->mynode, s);
 }
 
 /**
@@ -993,62 +975,6 @@ void synchronize_srcu(struct srcu_struct *sp)
 }
 EXPORT_SYMBOL_GPL(synchronize_srcu);
 
-/**
- * get_state_synchronize_srcu - Provide an end-of-grace-period cookie
- * @ssp: srcu_struct to provide cookie for.
- *
- * This function returns a cookie that can be passed to
- * poll_state_synchronize_srcu(), which will return true if a full grace
- * period has elapsed in the meantime.  It is the caller's responsibility
- * to make sure that grace period happens, for example, by invoking
- * call_srcu() after return from get_state_synchronize_srcu().
- */
-unsigned long get_state_synchronize_srcu(struct srcu_struct *ssp)
-{
-	// Any prior manipulation of SRCU-protected data must happen
-	// before the load from ->srcu_gp_seq.
-	smp_mb();
-	return rcu_seq_snap(&ssp->srcu_gp_seq);
-}
-EXPORT_SYMBOL_GPL(get_state_synchronize_srcu);
-
-/**
- * start_poll_synchronize_srcu - Provide cookie and start grace period
- * @ssp: srcu_struct to provide cookie for.
- *
- * This function returns a cookie that can be passed to
- * poll_state_synchronize_srcu(), which will return true if a full grace
- * period has elapsed in the meantime.  Unlike get_state_synchronize_srcu(),
- * this function also ensures that any needed SRCU grace period will be
- * started.  This convenience does come at a cost in terms of CPU overhead.
- */
-unsigned long start_poll_synchronize_srcu(struct srcu_struct *ssp)
-{
-	return srcu_gp_start_if_needed(ssp, NULL, true);
-}
-EXPORT_SYMBOL_GPL(start_poll_synchronize_srcu);
-
-/**
- * poll_state_synchronize_srcu - Has cookie's grace period ended?
- * @ssp: srcu_struct to provide cookie for.
- * @cookie: Return value from get_state_synchronize_srcu() or start_poll_synchronize_srcu().
- *
- * This function takes the cookie that was returned from either
- * get_state_synchronize_srcu() or start_poll_synchronize_srcu(), and
- * returns @true if an SRCU grace period elapsed since the time that the
- * cookie was created.
- */
-bool poll_state_synchronize_srcu(struct srcu_struct *ssp, unsigned long cookie)
-{
-	if (!rcu_seq_done(&ssp->srcu_gp_seq, cookie))
-		return false;
-	// Ensure that the end of the SRCU grace period happens before
-	// any subsequent code that the caller might execute.
-	smp_mb(); // ^^^
-	return true;
-}
-EXPORT_SYMBOL_GPL(poll_state_synchronize_srcu);
-
 /*
  * Callback function for srcu_barrier() use.
  */
@@ -1101,7 +1027,7 @@ void srcu_barrier(struct srcu_struct *sp)
 		sdp->srcu_barrier_head.func = srcu_barrier_cb;
 		debug_rcu_head_queue(&sdp->srcu_barrier_head);
 		if (!rcu_segcblist_entrain(&sdp->srcu_cblist,
-					   &sdp->srcu_barrier_head)) {
+					   &sdp->srcu_barrier_head, 0)) {
 			debug_rcu_head_unqueue(&sdp->srcu_barrier_head);
 			atomic_dec(&sp->srcu_barrier_cpu_cnt);
 		}
@@ -1127,7 +1053,7 @@ EXPORT_SYMBOL_GPL(srcu_barrier);
  */
 unsigned long srcu_batches_completed(struct srcu_struct *sp)
 {
-	return READ_ONCE(ssp->srcu_idx);
+	return sp->srcu_idx;
 }
 EXPORT_SYMBOL_GPL(srcu_batches_completed);
 
@@ -1177,10 +1103,8 @@ static void srcu_advance_state(struct srcu_struct *sp)
 			mutex_unlock(&sp->srcu_gp_mutex);
 			return; /* readers present, retry later. */
 		}
-		srcu_flip(ssp);
-		spin_lock_irq_rcu_node(ssp);
-		rcu_seq_set_state(&ssp->srcu_gp_seq, SRCU_STATE_SCAN2);
-		spin_unlock_irq_rcu_node(ssp);
+		srcu_flip(sp);
+		rcu_seq_set_state(&sp->srcu_gp_seq, SRCU_STATE_SCAN2);
 	}
 
 	if (rcu_seq_state(READ_ONCE(sp->srcu_gp_seq)) == SRCU_STATE_SCAN2) {
@@ -1314,9 +1238,9 @@ void srcu_torture_stats_print(struct srcu_struct *sp, char *tt, char *tf)
 		long c0, c1;
 		struct srcu_data *counts;
 
-		sdp = per_cpu_ptr(ssp->sda, cpu);
-		u0 = data_race(sdp->srcu_unlock_count[!idx]);
-		u1 = data_race(sdp->srcu_unlock_count[idx]);
+		counts = per_cpu_ptr(sp->sda, cpu);
+		u0 = counts->srcu_unlock_count[!idx];
+		u1 = counts->srcu_unlock_count[idx];
 
 		/*
 		 * Make sure that a lock is always counted if the corresponding
@@ -1324,8 +1248,8 @@ void srcu_torture_stats_print(struct srcu_struct *sp, char *tt, char *tf)
 		 */
 		smp_rmb();
 
-		l0 = data_race(sdp->srcu_lock_count[!idx]);
-		l1 = data_race(sdp->srcu_lock_count[idx]);
+		l0 = counts->srcu_lock_count[!idx];
+		l1 = counts->srcu_lock_count[idx];
 
 		c0 = l0 - u0;
 		c1 = l1 - u1;

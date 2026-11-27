@@ -161,25 +161,29 @@ static inline void rcu_init_nohz(void) { }
  * Note a voluntary context switch for RCU-tasks benefit.  This is a
  * macro rather than an inline function to avoid #include hell.
  */
-#ifdef CONFIG_TASKS_RCU_GENERIC
-#define rcu_tasks_qs(t, preempt)					\
-	do {								\
-		if (READ_ONCE((t)->rcu_tasks_holdout))			\
-			WRITE_ONCE((t)->rcu_tasks_holdout, false);	\
+#ifdef CONFIG_TASKS_RCU
+#define rcu_note_voluntary_context_switch_lite(t) \
+	do { \
+		if (READ_ONCE((t)->rcu_tasks_holdout)) \
+			WRITE_ONCE((t)->rcu_tasks_holdout, false); \
 	} while (0)
-#define rcu_note_voluntary_context_switch(t) rcu_tasks_qs(t, false)
+#define rcu_note_voluntary_context_switch(t) \
+	do { \
+		rcu_all_qs(); \
+		rcu_note_voluntary_context_switch_lite(t); \
+	} while (0)
 void call_rcu_tasks(struct rcu_head *head, rcu_callback_t func);
 void synchronize_rcu_tasks(void);
 void exit_tasks_rcu_start(void);
 void exit_tasks_rcu_finish(void);
-#else /* #ifdef CONFIG_TASKS_RCU_GENERIC */
-#define rcu_tasks_qs(t, preempt)	do { } while (0)
-#define rcu_note_voluntary_context_switch(t) do { } while (0)
-#define call_rcu_tasks call_rcu
-#define synchronize_rcu_tasks synchronize_rcu
+#else /* #ifdef CONFIG_TASKS_RCU */
+#define rcu_note_voluntary_context_switch_lite(t)	do { } while (0)
+#define rcu_note_voluntary_context_switch(t)		rcu_all_qs()
+#define call_rcu_tasks call_rcu_sched
+#define synchronize_rcu_tasks synchronize_sched
 static inline void exit_tasks_rcu_start(void) { }
 static inline void exit_tasks_rcu_finish(void) { }
-#endif /* #else #ifdef CONFIG_TASKS_RCU_GENERIC */
+#endif /* #else #ifdef CONFIG_TASKS_RCU */
 
 /**
  * cond_resched_tasks_rcu_qs - Report potential quiescent states to RCU
@@ -190,8 +194,8 @@ static inline void exit_tasks_rcu_finish(void) { }
  */
 #define cond_resched_tasks_rcu_qs() \
 do { \
-	rcu_tasks_qs(current, false); \
-	cond_resched(); \
+	if (!cond_resched()) \
+		rcu_note_voluntary_context_switch(current); \
 } while (0)
 
 /**
@@ -886,7 +890,6 @@ static inline notrace void rcu_read_unlock_sched_notrace(void)
  * structure can be handled by kfree_rcu()?
  */
 #define __is_kfree_rcu_offset(offset) ((offset) < 4096)
-#define __is_kvfree_rcu_offset(offset) ((offset) < 4096)
 
 /*
  * Helper macro for kfree_rcu() to prevent argument-expansion eyestrain.
